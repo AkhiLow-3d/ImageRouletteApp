@@ -7,7 +7,7 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import List, Optional
 
-from PySide6.QtCore import Qt, QTimer, QSize, QEvent
+from PySide6.QtCore import Qt, QTimer, QSize, QEvent, Signal
 from PySide6.QtGui import QAction, QPixmap, QIcon, QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -25,11 +25,11 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QDoubleSpinBox,
+    QSpinBox,
     QSplitter,
     QToolBar,
     QVBoxLayout,
     QWidget,
-    QSpinBox
 )
 
 
@@ -54,6 +54,8 @@ class HistoryEntry:
 
 
 class ImageViewer(QLabel):
+    clicked = Signal()
+
     def __init__(self) -> None:
         super().__init__()
         self._pixmap: Optional[QPixmap] = None
@@ -97,6 +99,11 @@ class ImageViewer(QLabel):
         )
         self.setPixmap(scaled)
 
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
@@ -104,6 +111,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(APP_NAME)
         self.resize(1500, 920)
         self.is_fullscreen_mode = False
+        self.is_presentation_mode = False
 
         self.images: List[ImageEntry] = []
         self.used_paths: List[str] = []
@@ -122,7 +130,13 @@ class MainWindow(QMainWindow):
         self.fullscreen_shortcut = QShortcut(QKeySequence("F11"), self)
         self.fullscreen_shortcut.activated.connect(self.toggle_fullscreen)
         self.escape_shortcut = QShortcut(QKeySequence(Qt.Key_Escape), self)
-        self.escape_shortcut.activated.connect(self.exit_fullscreen_if_needed)
+        self.escape_shortcut.activated.connect(self.exit_special_modes_if_needed)
+        self.start_shortcut_space = QShortcut(QKeySequence(Qt.Key_Space), self)
+        self.start_shortcut_space.activated.connect(self.start_roulette)
+        self.start_shortcut_enter = QShortcut(QKeySequence(Qt.Key_Return), self)
+        self.start_shortcut_enter.activated.connect(self.start_roulette)
+        self.start_shortcut_enter2 = QShortcut(QKeySequence(Qt.Key_Enter), self)
+        self.start_shortcut_enter2.activated.connect(self.start_roulette)
 
         self._build_ui()
         self._load_state()
@@ -146,12 +160,16 @@ class MainWindow(QMainWindow):
         fullscreen_action.triggered.connect(self.toggle_fullscreen)
         toolbar.addAction(fullscreen_action)
 
+        presentation_action = QAction("配信表示モード切替", self)
+        presentation_action.triggered.connect(self.toggle_presentation_mode)
+        toolbar.addAction(presentation_action)
+
         central = QWidget()
         self.setCentralWidget(central)
         root_layout = QHBoxLayout(central)
 
-        splitter = QSplitter(Qt.Horizontal)
-        root_layout.addWidget(splitter)
+        self.main_splitter = QSplitter(Qt.Horizontal)
+        root_layout.addWidget(self.main_splitter)
 
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
@@ -219,10 +237,15 @@ class MainWindow(QMainWindow):
         self.fullscreen_button.clicked.connect(self.toggle_fullscreen)
         left_layout.addWidget(self.fullscreen_button)
 
+        self.presentation_button = QPushButton("配信表示モード切替")
+        self.presentation_button.clicked.connect(self.toggle_presentation_mode)
+        left_layout.addWidget(self.presentation_button)
+
         center_panel = QWidget()
         center_layout = QVBoxLayout(center_panel)
 
         self.viewer = ImageViewer()
+        self.viewer.clicked.connect(self.start_roulette)
         center_layout.addWidget(self.viewer, stretch=1)
 
         self.name_label = QLabel("表示名: -")
@@ -256,12 +279,17 @@ class MainWindow(QMainWindow):
         self.history_list.setSelectionMode(QAbstractItemView.NoSelection)
         right_layout.addWidget(self.history_list, stretch=1)
 
-        splitter.addWidget(left_panel)
-        splitter.addWidget(center_panel)
-        splitter.addWidget(right_panel)
-        splitter.setStretchFactor(0, 2)
-        splitter.setStretchFactor(1, 4)
-        splitter.setStretchFactor(2, 2)
+        self.left_panel = left_panel
+        self.center_panel = center_panel
+        self.right_panel = right_panel
+        self.toolbar_ref = toolbar
+
+        self.main_splitter.addWidget(left_panel)
+        self.main_splitter.addWidget(center_panel)
+        self.main_splitter.addWidget(right_panel)
+        self.main_splitter.setStretchFactor(0, 2)
+        self.main_splitter.setStretchFactor(1, 4)
+        self.main_splitter.setStretchFactor(2, 2)
 
     def add_images(self) -> None:
         files, _ = QFileDialog.getOpenFileNames(
@@ -707,7 +735,34 @@ class MainWindow(QMainWindow):
             self.showFullScreen()
             self.is_fullscreen_mode = True
 
-    def exit_fullscreen_if_needed(self) -> None:
+    def toggle_presentation_mode(self) -> None:
+        if self.is_presentation_mode:
+            self.is_presentation_mode = False
+            self.left_panel.show()
+            self.right_panel.show()
+            self.toolbar_ref.show()
+            self.name_label.show()
+            self.status_label.show()
+            self.start_button.show()
+            self.reset_all_button.show()
+            self.showNormal()
+            self.is_fullscreen_mode = False
+        else:
+            self.is_presentation_mode = True
+            self.left_panel.hide()
+            self.right_panel.hide()
+            self.toolbar_ref.hide()
+            self.name_label.hide()
+            self.status_label.hide()
+            self.start_button.hide()
+            self.reset_all_button.hide()
+            self.showFullScreen()
+            self.is_fullscreen_mode = True
+
+    def exit_special_modes_if_needed(self) -> None:
+        if self.is_presentation_mode:
+            self.toggle_presentation_mode()
+            return
         if self.is_fullscreen_mode:
             self.toggle_fullscreen()
 
