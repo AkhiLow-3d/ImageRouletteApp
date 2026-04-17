@@ -7,8 +7,8 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import List, Optional
 
-from PySide6.QtCore import Qt, QTimer, QSize
-from PySide6.QtGui import QAction, QPixmap, QIcon, QColor
+from PySide6.QtCore import Qt, QTimer, QSize, QEvent
+from PySide6.QtGui import QAction, QPixmap, QIcon, QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QToolBar,
     QVBoxLayout,
     QWidget,
+    QSpinBox
 )
 
 
@@ -102,6 +103,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle(APP_NAME)
         self.resize(1500, 920)
+        self.is_fullscreen_mode = False
 
         self.images: List[ImageEntry] = []
         self.used_paths: List[str] = []
@@ -111,12 +113,16 @@ class MainWindow(QMainWindow):
         self.final_selected_path: Optional[str] = None
         self.roulette_running = False
         self.elapsed_ms = 0
-        self.tick_ms = 80
+        self.tick_ms = 120
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._on_roulette_tick)
 
         self.icon_cache: dict[tuple[str, int, int], QIcon] = {}
+        self.fullscreen_shortcut = QShortcut(QKeySequence("F11"), self)
+        self.fullscreen_shortcut.activated.connect(self.toggle_fullscreen)
+        self.escape_shortcut = QShortcut(QKeySequence(Qt.Key_Escape), self)
+        self.escape_shortcut.activated.connect(self.exit_fullscreen_if_needed)
 
         self._build_ui()
         self._load_state()
@@ -136,6 +142,10 @@ class MainWindow(QMainWindow):
         add_folder_action.triggered.connect(self.add_folder)
         toolbar.addAction(add_folder_action)
 
+        fullscreen_action = QAction("フルスクリーン切替", self)
+        fullscreen_action.triggered.connect(self.toggle_fullscreen)
+        toolbar.addAction(fullscreen_action)
+
         central = QWidget()
         self.setCentralWidget(central)
         root_layout = QHBoxLayout(central)
@@ -148,11 +158,19 @@ class MainWindow(QMainWindow):
 
         form = QFormLayout()
         self.stop_seconds_spin = QDoubleSpinBox()
-        self.stop_seconds_spin.setRange(0.0, 60.0)
+        self.stop_seconds_spin.setRange(0.0, 9999999.0)
         self.stop_seconds_spin.setDecimals(1)
         self.stop_seconds_spin.setSingleStep(0.5)
         self.stop_seconds_spin.setValue(3.0)
+        self.stop_seconds_spin.setKeyboardTracking(False)
         form.addRow("停止秒数", self.stop_seconds_spin)
+
+        self.base_interval_spin = QSpinBox()
+        self.base_interval_spin.setRange(50, 5000)
+        self.base_interval_spin.setSingleStep(10)
+        self.base_interval_spin.setValue(120)
+        self.base_interval_spin.setSuffix(" ms")
+        form.addRow("切替間隔", self.base_interval_spin)
 
         self.no_repeat_checkbox = QCheckBox("重複しないモード")
         self.no_repeat_checkbox.setChecked(True)
@@ -196,6 +214,10 @@ class MainWindow(QMainWindow):
         self.clear_history_button = QPushButton("履歴クリア")
         self.clear_history_button.clicked.connect(self.clear_history)
         left_layout.addWidget(self.clear_history_button)
+
+        self.fullscreen_button = QPushButton("フルスクリーン切替 (F11)")
+        self.fullscreen_button.clicked.connect(self.toggle_fullscreen)
+        left_layout.addWidget(self.fullscreen_button)
 
         center_panel = QWidget()
         center_layout = QVBoxLayout(center_panel)
@@ -394,7 +416,7 @@ class MainWindow(QMainWindow):
 
         self.roulette_running = True
         self.elapsed_ms = 0
-        self.tick_ms = 80
+        self.tick_ms = max(50, int(self.base_interval_spin.value()))
         self.start_button.setEnabled(False)
         self.timer.start(self.tick_ms)
         self._update_status_label()
@@ -431,13 +453,14 @@ class MainWindow(QMainWindow):
             self._finish_roulette_immediately()
 
     def _calc_next_tick_ms(self, progress: float) -> int:
+        base = max(50, int(self.base_interval_spin.value()))
         if progress < 0.50:
-            return 80
+            return base
         if progress < 0.75:
-            return 130
+            return int(base * 1.5)
         if progress < 0.90:
-            return 220
-        return 360
+            return int(base * 2.3)
+        return int(base * 3.4)
 
     def _finish_roulette_immediately(self) -> None:
         self.timer.stop()
@@ -586,7 +609,7 @@ class MainWindow(QMainWindow):
             self.status_label.setText("抽選中...")
             return
         self.status_label.setText(
-            f"登録: {total_count}枚 / 抽選可能: {available_count}枚 / 履歴: {len(self.history)}件"
+            f"登録: {total_count}枚 / 抽選可能: {available_count}枚 / 履歴: {len(self.history)}件 / 切替: {self.base_interval_spin.value()}ms"
         )
 
     def _refresh_used_marks_only(self) -> None:
@@ -613,6 +636,7 @@ class MainWindow(QMainWindow):
     def _save_state(self) -> None:
         data = {
             "stop_seconds": float(self.stop_seconds_spin.value()),
+            "base_interval_ms": int(self.base_interval_spin.value()),
             "no_repeat": self.no_repeat_checkbox.isChecked(),
             "images": [asdict(entry) for entry in self.images],
             "used_paths": self.used_paths,
@@ -659,16 +683,33 @@ class MainWindow(QMainWindow):
         self.history.sort(key=lambda x: x.draw_order)
 
         stop_seconds = data.get("stop_seconds", 3.0)
+        base_interval_ms = data.get("base_interval_ms", 120)
         no_repeat = data.get("no_repeat", True)
         try:
             self.stop_seconds_spin.setValue(float(stop_seconds))
         except (TypeError, ValueError):
             self.stop_seconds_spin.setValue(3.0)
+        try:
+            self.base_interval_spin.setValue(int(base_interval_ms))
+        except (TypeError, ValueError):
+            self.base_interval_spin.setValue(120)
         self.no_repeat_checkbox.setChecked(bool(no_repeat))
 
         if self.images:
             self.viewer.set_image(self.images[0].path)
             self.name_label.setText(f"表示名: {self.images[0].name}")
+
+    def toggle_fullscreen(self) -> None:
+        if self.is_fullscreen_mode:
+            self.showNormal()
+            self.is_fullscreen_mode = False
+        else:
+            self.showFullScreen()
+            self.is_fullscreen_mode = True
+
+    def exit_fullscreen_if_needed(self) -> None:
+        if self.is_fullscreen_mode:
+            self.toggle_fullscreen()
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         self._save_state()
