@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from PySide6.QtCore import Qt, QTimer, QSize
-from PySide6.QtGui import QAction, QPixmap, QIcon
+from PySide6.QtGui import QAction, QPixmap, QIcon, QColor
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
@@ -18,17 +18,14 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QPushButton,
     QSizePolicy,
-    QSpinBox,
     QDoubleSpinBox,
     QSplitter,
-    QStyle,
     QToolBar,
     QVBoxLayout,
     QWidget,
@@ -119,6 +116,8 @@ class MainWindow(QMainWindow):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._on_roulette_tick)
 
+        self.icon_cache: dict[tuple[str, int, int], QIcon] = {}
+
         self._build_ui()
         self._load_state()
         self._refresh_all_lists()
@@ -137,10 +136,6 @@ class MainWindow(QMainWindow):
         add_folder_action.triggered.connect(self.add_folder)
         toolbar.addAction(add_folder_action)
 
-        save_action = QAction("保存", self)
-        save_action.triggered.connect(self._save_state)
-        toolbar.addAction(save_action)
-
         central = QWidget()
         self.setCentralWidget(central)
         root_layout = QHBoxLayout(central)
@@ -148,7 +143,6 @@ class MainWindow(QMainWindow):
         splitter = QSplitter(Qt.Horizontal)
         root_layout.addWidget(splitter)
 
-        # Left panel
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
 
@@ -195,11 +189,14 @@ class MainWindow(QMainWindow):
         button_row2.addWidget(self.reset_used_button)
         left_layout.addLayout(button_row2)
 
+        self.clear_all_images_button = QPushButton("登録画像を全削除")
+        self.clear_all_images_button.clicked.connect(self.clear_all_images)
+        left_layout.addWidget(self.clear_all_images_button)
+
         self.clear_history_button = QPushButton("履歴クリア")
         self.clear_history_button.clicked.connect(self.clear_history)
         left_layout.addWidget(self.clear_history_button)
 
-        # Center panel
         center_panel = QWidget()
         center_layout = QVBoxLayout(center_panel)
 
@@ -213,9 +210,7 @@ class MainWindow(QMainWindow):
 
         self.status_label = QLabel("待機中")
         self.status_label.setAlignment(Qt.AlignCenter)
-        self.status_label.setStyleSheet(
-            "font-size: 16px; color: #bbbbbb; padding-bottom: 8px;"
-        )
+        self.status_label.setStyleSheet("font-size: 16px; color: #bbbbbb; padding-bottom: 8px;")
         center_layout.addWidget(self.status_label)
 
         start_row = QHBoxLayout()
@@ -230,7 +225,6 @@ class MainWindow(QMainWindow):
         start_row.addWidget(self.reset_all_button)
         center_layout.addLayout(start_row)
 
-        # Right panel
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
         right_layout.addWidget(QLabel("履歴（引いた順）"))
@@ -269,9 +263,7 @@ class MainWindow(QMainWindow):
                 paths.append(str(child))
 
         if not paths:
-            QMessageBox.information(
-                self, "画像なし", "対応画像が見つかりませんでした。"
-            )
+            QMessageBox.information(self, "画像なし", "対応画像が見つかりませんでした。")
             return
 
         self._add_image_paths(paths)
@@ -289,9 +281,7 @@ class MainWindow(QMainWindow):
             if warning:
                 warnings.append(f"{os.path.basename(norm)}: {warning}")
 
-            self.images.append(
-                ImageEntry(path=norm, name=parsed_name, order=parsed_order)
-            )
+            self.images.append(ImageEntry(path=norm, name=parsed_name, order=parsed_order))
             existing.add(norm)
 
         self.images.sort(key=self._image_sort_key)
@@ -316,11 +306,7 @@ class MainWindow(QMainWindow):
         return stem, None, "推奨ルールは 001_表示名 です"
 
     def _image_sort_key(self, entry: ImageEntry):
-        return (
-            entry.order is None,
-            entry.order if entry.order is not None else 999999,
-            entry.name.lower(),
-        )
+        return (entry.order is None, entry.order if entry.order is not None else 999999, entry.name.lower())
 
     def remove_selected_image(self) -> None:
         item = self.image_list.currentItem()
@@ -337,6 +323,35 @@ class MainWindow(QMainWindow):
             self.viewer.set_image(None)
             self.name_label.setText("表示名: -")
 
+        self._refresh_all_lists()
+        self._update_status_label()
+        self._save_state()
+
+    def clear_all_images(self) -> None:
+        if not self.images:
+            QMessageBox.information(self, "削除対象なし", "登録画像はありません。")
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "登録画像を全削除",
+            "登録画像、使用済み状態、履歴をすべて削除します。よろしいですか？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        self.timer.stop()
+        self.roulette_running = False
+        self.final_selected_path = None
+        self.current_result_path = None
+        self.images = []
+        self.used_paths = []
+        self.history = []
+        self.viewer.set_image(None)
+        self.name_label.setText("表示名: -")
+        self.start_button.setEnabled(True)
         self._refresh_all_lists()
         self._update_status_label()
         self._save_state()
@@ -367,11 +382,7 @@ class MainWindow(QMainWindow):
 
         available = self._get_available_images()
         if not available:
-            QMessageBox.information(
-                self,
-                "抽選終了",
-                "未使用の画像がありません。使用済み解除または全体リセットをしてください。",
-            )
+            QMessageBox.information(self, "抽選終了", "未使用の画像がありません。使用済み解除または全体リセットをしてください。")
             return
 
         self.final_selected_path = random.choice(available).path
@@ -458,13 +469,22 @@ class MainWindow(QMainWindow):
         self.history.append(history_entry)
 
         self.final_selected_path = None
-        self._refresh_all_lists()
+        self._refresh_used_marks_only()
+
+        item = QListWidgetItem()
+        item.setText(f"{history_entry.draw_order}回目\n{history_entry.name}")
+        icon = self._make_icon(history_entry.path, QSize(96, 96))
+        if icon:
+            item.setIcon(icon)
+        item.setToolTip(history_entry.path)
+        self.history_list.addItem(item)
+
         self._update_status_label()
         self._save_state()
 
     def reset_used_images(self) -> None:
         self.used_paths = []
-        self._refresh_all_lists()
+        self._refresh_used_marks_only()
         self._update_status_label()
         self._save_state()
 
@@ -493,6 +513,12 @@ class MainWindow(QMainWindow):
         self._refresh_history_list()
 
     def _refresh_image_list(self) -> None:
+        selected_path = None
+        current_item = self.image_list.currentItem()
+        if current_item:
+            selected_path = current_item.data(Qt.UserRole)
+
+        self.image_list.setUpdatesEnabled(False)
         self.image_list.clear()
         used = set(self.used_paths)
 
@@ -510,9 +536,21 @@ class MainWindow(QMainWindow):
             icon = self._make_icon(entry.path, QSize(120, 120))
             if icon:
                 item.setIcon(icon)
+            if entry.path in used and self.no_repeat_checkbox.isChecked():
+                item.setBackground(QColor("#2a2a2a"))
             self.image_list.addItem(item)
 
+        self.image_list.setUpdatesEnabled(True)
+
+        if selected_path:
+            for i in range(self.image_list.count()):
+                item = self.image_list.item(i)
+                if item.data(Qt.UserRole) == selected_path:
+                    self.image_list.setCurrentItem(item)
+                    break
+
     def _refresh_history_list(self) -> None:
+        self.history_list.setUpdatesEnabled(False)
         self.history_list.clear()
         for hist in self.history:
             item = QListWidgetItem()
@@ -522,15 +560,24 @@ class MainWindow(QMainWindow):
                 item.setIcon(icon)
             item.setToolTip(hist.path)
             self.history_list.addItem(item)
+        self.history_list.setUpdatesEnabled(True)
 
     def _make_icon(self, path: str, size: QSize) -> Optional[QIcon]:
         if not os.path.exists(path):
             return None
+
+        key = (path, size.width(), size.height())
+        cached = self.icon_cache.get(key)
+        if cached is not None:
+            return cached
+
         pixmap = QPixmap(path)
         if pixmap.isNull():
             return None
         scaled = pixmap.scaled(size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        return QIcon(scaled)
+        icon = QIcon(scaled)
+        self.icon_cache[key] = icon
+        return icon
 
     def _update_status_label(self) -> None:
         available_count = len(self._get_available_images())
@@ -541,6 +588,27 @@ class MainWindow(QMainWindow):
         self.status_label.setText(
             f"登録: {total_count}枚 / 抽選可能: {available_count}枚 / 履歴: {len(self.history)}件"
         )
+
+    def _refresh_used_marks_only(self) -> None:
+        used = set(self.used_paths)
+        self.image_list.setUpdatesEnabled(False)
+        for i in range(self.image_list.count()):
+            item = self.image_list.item(i)
+            path = item.data(Qt.UserRole)
+            entry = self._find_image(path)
+            if not entry:
+                continue
+
+            label = entry.name
+            if entry.order is not None:
+                label = f"{entry.order:03d}_{entry.name}"
+            if path in used and self.no_repeat_checkbox.isChecked():
+                label += "\n[使用済み]"
+                item.setBackground(QColor("#2a2a2a"))
+            else:
+                item.setBackground(QColor("transparent"))
+            item.setText(label)
+        self.image_list.setUpdatesEnabled(True)
 
     def _save_state(self) -> None:
         data = {
@@ -587,9 +655,7 @@ class MainWindow(QMainWindow):
             name = raw.get("name")
             draw_order = raw.get("draw_order")
             if path in existing_paths and isinstance(draw_order, int) and name:
-                self.history.append(
-                    HistoryEntry(draw_order=draw_order, path=path, name=name)
-                )
+                self.history.append(HistoryEntry(draw_order=draw_order, path=path, name=name))
         self.history.sort(key=lambda x: x.draw_order)
 
         stop_seconds = data.get("stop_seconds", 3.0)
